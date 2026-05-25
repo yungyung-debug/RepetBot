@@ -1,16 +1,19 @@
 import sqlite3
+import asyncio
+import os
+import shutil
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import (Message, InlineKeyboardMarkup, InlineKeyboardButton,
-                          ReplyKeyboardMarkup, KeyboardButton, CallbackQuery)
+                          ReplyKeyboardMarkup, KeyboardButton, CallbackQuery, FSInputFile)
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-import asyncio
-import os
 
 # ========== НАСТРОЙКИ ==========
+# Для Replit используйте os.environ.get()
+# Для локального запуска замените на свои значения
 TOKEN = os.environ.get('TOKEN', "ВАШ_ТОКЕН_СЮДА")
 REPETITOR_ID = int(os.environ.get('REPETITOR_ID', "123456789"))
 # ===============================
@@ -346,12 +349,29 @@ async def settings(message: Message):
     if message.from_user.id != REPETITOR_ID:
         return
     
+    # Подсчитываем количество домашек
+    cursor.execute("SELECT COUNT(*) FROM homework WHERE status = 'new'")
+    new_count = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM homework WHERE status = 'viewed'")
+    viewed_count = cursor.fetchone()[0]
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text="🗑 Очистить старые домашки", callback_data="clear_hw")]
+        [InlineKeyboardButton(text=f"🗑 Удалить просмотренные домашки ({viewed_count})", callback_data="clear_viewed_hw")],
+        [InlineKeyboardButton(text=f"⚠️ Удалить ВСЕ домашки ({new_count + viewed_count})", callback_data="clear_all_hw")],
+        [InlineKeyboardButton(text="💾 Резервное копирование БД", callback_data="backup_db")]
     ])
     
-    await message.answer("🔧 Настройки бота:", reply_markup=keyboard)
+    await message.answer(
+        f"🔧 *Настройки бота*\n\n"
+        f"📸 Новых домашек: {new_count}\n"
+        f"✅ Просмотренных: {viewed_count}\n"
+        f"📦 Всего в БД: {new_count + viewed_count}\n\n"
+        f"Выберите действие:",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
 
 # ========== CALLBACK HANDLERS ==========
 
@@ -546,10 +566,9 @@ async def reply_to_homework(callback: CallbackQuery, state: FSMContext):
         await callback.answer("❌ Эта кнопка только для репетитора", show_alert=True)
         return
     
-    # Извлекаем имя ученика и ID из callback_data
+    # Извлекаем имя ученика из callback_data
     parts = callback.data.split("_")
     student_name = parts[2]
-    hw_id = int(parts[3]) if len(parts) > 3 else None
     
     # Находим ID ученика по имени
     cursor.execute("SELECT user_id FROM students WHERE student_name = ?", (student_name,))
@@ -583,6 +602,8 @@ async def mark_homework_done(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
     await callback.answer("✅ Домашнее задание отмечено как просмотренное")
 
+# ========== ОБРАБОТЧИКИ ДЛЯ НАСТРОЕК (УДАЛЕНИЕ И БЭКАП) ==========
+
 @dp.callback_query(F.data == "stats")
 async def show_stats(callback: CallbackQuery):
     if callback.from_user.id != REPETITOR_ID:
@@ -610,15 +631,112 @@ async def show_stats(callback: CallbackQuery):
     )
     await callback.answer()
 
-@dp.callback_query(F.data == "clear_hw")
-async def clear_old_hw(callback: CallbackQuery):
+@dp.callback_query(F.data == "clear_viewed_hw")
+async def clear_viewed_homeworks(callback: CallbackQuery):
+    if callback.from_user.id != REPETITOR_ID:
+        await callback.answer("❌ Только для репетитора", show_alert=True)
+        return
+    
+    # Подтверждение
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data="confirm_clear_viewed")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_clear")]
+    ])
+    
+    await callback.message.answer(
+        "⚠️ *Подтверждение удаления*\n\n"
+        "Вы действительно хотите удалить ВСЕ просмотренные домашние задания?\n\n"
+        "Это действие нельзя отменить.",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "clear_all_hw")
+async def clear_all_homeworks(callback: CallbackQuery):
+    if callback.from_user.id != REPETITOR_ID:
+        await callback.answer("❌ Только для репетитора", show_alert=True)
+        return
+    
+    # Подсчитываем количество
+    cursor.execute("SELECT COUNT(*) FROM homework")
+    total = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT COUNT(*) FROM homework WHERE status = 'new'")
+    new_count = cursor.fetchone()[0]
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚠️ ДА, УДАЛИТЬ ВСЁ", callback_data="confirm_clear_all")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_clear")]
+    ])
+    
+    await callback.message.answer(
+        f"🚨 *ОПАСНОЕ ДЕЙСТВИЕ!*\n\n"
+        f"Вы хотите удалить ВСЕ домашние задания ({total} шт.)\n"
+        f"Из них НОВЫХ: {new_count}\n\n"
+        f"**Эти задания будут удалены без возможности восстановления!**\n\n"
+        f"Нажмите кнопку ниже ТОЛЬКО если вы уверены:",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "confirm_clear_viewed")
+async def confirm_clear_viewed(callback: CallbackQuery):
     if callback.from_user.id != REPETITOR_ID:
         return
+    
+    cursor.execute("SELECT COUNT(*) FROM homework WHERE status = 'viewed'")
+    count = cursor.fetchone()[0]
     
     cursor.execute("DELETE FROM homework WHERE status = 'viewed'")
     conn.commit()
     
-    await callback.message.answer("✅ Старые просмотренные домашки удалены")
+    await callback.message.edit_text(f"✅ Удалено {count} просмотренных домашних заданий.")
+    await callback.answer()
+
+@dp.callback_query(F.data == "confirm_clear_all")
+async def confirm_clear_all(callback: CallbackQuery):
+    if callback.from_user.id != REPETITOR_ID:
+        return
+    
+    cursor.execute("SELECT COUNT(*) FROM homework")
+    count = cursor.fetchone()[0]
+    
+    cursor.execute("DELETE FROM homework")
+    conn.commit()
+    
+    await callback.message.edit_text(f"⚠️ Удалено ВСЕХ домашних заданий: {count} шт.")
+    await callback.answer()
+
+@dp.callback_query(F.data == "cancel_clear")
+async def cancel_clear(callback: CallbackQuery):
+    await callback.message.edit_text("❌ Удаление отменено.")
+    await callback.answer()
+
+@dp.callback_query(F.data == "backup_db")
+async def backup_database(callback: CallbackQuery):
+    if callback.from_user.id != REPETITOR_ID:
+        return
+    
+    try:
+        backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        shutil.copy2("tutor_bot.db", backup_name)
+        
+        # Отправляем файл репетитору
+        with open(backup_name, 'rb') as f:
+            await callback.message.answer_document(
+                FSInputFile(backup_name),
+                caption=f"💾 Резервная копия БД от {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+            )
+        
+        # Удаляем временный файл
+        os.remove(backup_name)
+        
+        await callback.message.answer("✅ Резервная копия создана и отправлена!")
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка при создании бэкапа: {e}")
+    
     await callback.answer()
 
 # ========== ОБРАБОТКА ФОТО (ДОМАШКА) ==========
@@ -738,8 +856,11 @@ async def process_teacher_send_photo(message: Message, state: FSMContext):
         student = cursor.fetchone()
         
         if student:
-            student_id = student[0] if isinstance(student, tuple) and len(student) > 0 else student_id
-            student_name = student[1] if len(student) > 1 else message.text
+            if message.text.isdigit():
+                student_name = student[0]
+            else:
+                student_id = student[0]
+                student_name = student[1]
             
             data = await state.get_data()
             photo_id = data.get('pending_photo')
@@ -757,13 +878,44 @@ async def process_teacher_send_photo(message: Message, state: FSMContext):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
+# ========== АВТОМАТИЧЕСКАЯ ОЧИСТКА СТАРЫХ ДОМАШЕК ==========
+
+async def auto_cleanup_old_homeworks():
+    """Автоматически удаляет домашку, которой больше 30 дней"""
+    while True:
+        try:
+            # Ждём 7 дней перед первым запуском
+            await asyncio.sleep(7 * 24 * 60 * 60)
+            
+            # Удаляем домашку, которой больше 30 дней
+            cursor.execute("""
+                DELETE FROM homework 
+                WHERE timestamp < datetime('now', '-30 days')
+            """)
+            conn.commit()
+            
+            deleted = cursor.rowcount
+            if deleted > 0:
+                await bot.send_message(
+                    REPETITOR_ID,
+                    f"🧹 Автоматическая очистка: удалено {deleted} старых домашек (старше 30 дней)"
+                )
+        except Exception as e:
+            print(f"Ошибка автоочистки: {e}")
+            await asyncio.sleep(24 * 60 * 60)  # При ошибке ждём сутки
+
 # ========== ЗАПУСК ==========
 
 async def main():
     print("🤖 Бот запущен!")
     print(f"📊 Репетитор ID: {REPETITOR_ID}")
     print("=" * 40)
+    
+    # Запускаем автоочистку в фоне
+    asyncio.create_task(auto_cleanup_old_homeworks())
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    asyncio.run(main())
     asyncio.run(main())
