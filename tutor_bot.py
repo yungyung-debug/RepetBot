@@ -12,8 +12,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 
 # ========== НАСТРОЙКИ ==========
-# Для Replit используйте os.environ.get()
-# Для локального запуска замените на свои значения
 TOKEN = os.environ.get('TOKEN', "ВАШ_ТОКЕН_СЮДА")
 REPETITOR_ID = int(os.environ.get('REPETITOR_ID', "123456789"))
 # ===============================
@@ -49,7 +47,8 @@ CREATE TABLE IF NOT EXISTS homework (
     photo_id TEXT,
     caption TEXT,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    status TEXT DEFAULT 'new'
+    status TEXT DEFAULT 'new',
+    message_id INTEGER
 )
 """)
 
@@ -83,13 +82,13 @@ class SetSchedule(StatesGroup):
 
 class ReplyToHomework(StatesGroup):
     waiting_for_photo = State()
+    waiting_for_text = State()
 
 class TeacherSendPhoto(StatesGroup):
     waiting_for_student_id = State()
 
 # ========== КЛАВИАТУРЫ ==========
 
-# Главное меню для ученика/родителя
 def student_keyboard():
     buttons = [
         [KeyboardButton(text="📅 Расписание")],
@@ -99,7 +98,6 @@ def student_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# Главное меню для репетитора
 def teacher_keyboard():
     buttons = [
         [KeyboardButton(text="📊 Все ученики")],
@@ -116,7 +114,6 @@ def teacher_keyboard():
 async def cmd_start(message: Message):
     user_id = message.from_user.id
     
-    # Проверяем, есть ли пользователь в БД
     cursor.execute("SELECT * FROM students WHERE user_id = ?", (user_id,))
     student = cursor.fetchone()
     
@@ -135,7 +132,7 @@ async def cmd_start(message: Message):
     else:
         await message.answer(
             "🎓 Добро пожаловать!\n\n"
-            "Пожалуйста, зарегистрируйтесь, отправив команду:\n"
+            "Зарегистрируйтесь командой:\n"
             "/register Ваше_Имя Имя_Ученика Телефон\n\n"
             "Пример: /register Иван Иванов Петя +79991234567"
         )
@@ -168,7 +165,6 @@ async def register_student(message: Message):
             reply_markup=student_keyboard()
         )
         
-        # Уведомляем репетитора
         await bot.send_message(
             REPETITOR_ID,
             f"🆕 Новый ученик зарегистрировался!\n\n"
@@ -267,10 +263,7 @@ async def add_student_manual(message: Message, state: FSMContext):
     if message.from_user.id != REPETITOR_ID:
         return
     
-    await message.answer(
-        "➕ Добавление нового ученика\n\n"
-        "Введите ФИО родителя/ученика:"
-    )
+    await message.answer("Введите ФИО родителя/ученика:")
     await state.set_state(AddStudent.waiting_for_name)
 
 @dp.message(AddStudent.waiting_for_name)
@@ -311,7 +304,7 @@ async def manage_lessons(message: Message):
         [InlineKeyboardButton(text="📊 Посмотреть баланс ученика", callback_data="check_balance")]
     ])
     
-    await message.answer("📝 Управление занятиями:\n\nВыберите действие:", reply_markup=keyboard)
+    await message.answer("📝 Управление занятиями:", reply_markup=keyboard)
 
 @dp.message(F.text == "📸 Просмотр домашек")
 async def view_homeworks(message: Message):
@@ -319,7 +312,7 @@ async def view_homeworks(message: Message):
         return
     
     cursor.execute("""
-        SELECT h.id, s.student_name, h.caption, h.timestamp, h.photo_id 
+        SELECT h.id, s.student_name, h.caption, h.timestamp, h.photo_id, h.student_id
         FROM homework h
         JOIN students s ON h.student_id = s.user_id
         WHERE h.status = 'new'
@@ -332,14 +325,16 @@ async def view_homeworks(message: Message):
         return
     
     for hw in homeworks:
-        hw_id, student_name, caption, timestamp, photo_id = hw
+        hw_id, student_name, caption, timestamp, photo_id, student_id = hw
         text = f"📸 Домашнее задание от {student_name}\n🕐 {timestamp}\n"
         if caption:
             text += f"📝 {caption}\n"
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Отмечено", callback_data=f"mark_hw_{hw_id}"),
-             InlineKeyboardButton(text="📝 Ответить", callback_data=f"reply_to_{student_name}_{hw_id}")]
+            [
+                InlineKeyboardButton(text="✅ Отмечено", callback_data=f"mark_{hw_id}"),
+                InlineKeyboardButton(text="📝 Ответить", callback_data=f"reply_{hw_id}_{student_id}")
+            ]
         ])
         
         await bot.send_photo(REPETITOR_ID, photo_id, caption=text, reply_markup=keyboard)
@@ -349,7 +344,6 @@ async def settings(message: Message):
     if message.from_user.id != REPETITOR_ID:
         return
     
-    # Подсчитываем количество домашек
     cursor.execute("SELECT COUNT(*) FROM homework WHERE status = 'new'")
     new_count = cursor.fetchone()[0]
     
@@ -358,326 +352,164 @@ async def settings(message: Message):
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
-        [InlineKeyboardButton(text=f"🗑 Удалить просмотренные домашки ({viewed_count})", callback_data="clear_viewed_hw")],
-        [InlineKeyboardButton(text=f"⚠️ Удалить ВСЕ домашки ({new_count + viewed_count})", callback_data="clear_all_hw")],
-        [InlineKeyboardButton(text="💾 Резервное копирование БД", callback_data="backup_db")]
+        [InlineKeyboardButton(text=f"🗑 Удалить просмотренные ({viewed_count})", callback_data="clear_viewed")],
+        [InlineKeyboardButton(text=f"⚠️ Удалить ВСЕ ({new_count + viewed_count})", callback_data="clear_all")],
+        [InlineKeyboardButton(text="💾 Резервная копия", callback_data="backup")]
     ])
     
     await message.answer(
         f"🔧 *Настройки бота*\n\n"
-        f"📸 Новых домашек: {new_count}\n"
+        f"📸 Новых: {new_count}\n"
         f"✅ Просмотренных: {viewed_count}\n"
-        f"📦 Всего в БД: {new_count + viewed_count}\n\n"
-        f"Выберите действие:",
+        f"📦 Всего: {new_count + viewed_count}",
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
 
-# ========== CALLBACK HANDLERS ==========
+# ========== CALLBACK ОБРАБОТЧИКИ ==========
 
-@dp.callback_query(F.data == "add_payment")
-async def callback_add_payment(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("Введите ID ученика (можно посмотреть в списке учеников):")
-    await state.set_state(AddPayment.waiting_for_student_id)
-    await callback.answer()
-
-@dp.message(AddPayment.waiting_for_student_id)
-async def process_payment_student_id(message: Message, state: FSMContext):
-    try:
-        student_id = int(message.text)
-        cursor.execute("SELECT student_name FROM students WHERE user_id = ?", (student_id,))
-        student = cursor.fetchone()
-        
-        if student:
-            await state.update_data(student_id=student_id)
-            await message.answer(f"Ученик: {student[0]}\n\nВведите количество оплаченных занятий:")
-            await state.set_state(AddPayment.waiting_for_amount)
-        else:
-            await message.answer("❌ Ученик с таким ID не найден!")
-            await state.clear()
-    except:
-        await message.answer("❌ ID должен быть числом!")
-        await state.clear()
-
-@dp.message(AddPayment.waiting_for_amount)
-async def process_payment_amount(message: Message, state: FSMContext):
-    try:
-        amount = int(message.text)
-        data = await state.get_data()
-        student_id = data['student_id']
-        
-        cursor.execute("UPDATE students SET paid_lessons = paid_lessons + ? WHERE user_id = ?", 
-                      (amount, student_id))
-        cursor.execute("INSERT INTO payments (student_id, amount) VALUES (?, ?)", 
-                      (student_id, amount))
-        conn.commit()
-        
-        cursor.execute("SELECT student_name FROM students WHERE user_id = ?", (student_id,))
-        student_name = cursor.fetchone()[0]
-        
-        await message.answer(f"✅ Добавлено {amount} занятий для {student_name}")
-        
-        # Уведомляем ученика
-        try:
-            await bot.send_message(
-                student_id,
-                f"💰 Пополнение баланса!\n\n"
-                f"Добавлено {amount} занятий."
-            )
-        except:
-            pass
-        
-        await state.clear()
-    except:
-        await message.answer("❌ Количество должно быть числом!")
-        await state.clear()
-
-@dp.callback_query(F.data == "complete_lesson")
-async def callback_complete_lesson(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("Введите ID ученика:")
-    await state.set_state(CompleteLesson.waiting_for_student_id)
-    await callback.answer()
-
-@dp.message(CompleteLesson.waiting_for_student_id)
-async def process_complete_lesson(message: Message, state: FSMContext):
-    try:
-        student_id = int(message.text)
-        cursor.execute("SELECT student_name, paid_lessons, completed_lessons FROM students WHERE user_id = ?", 
-                      (student_id,))
-        student = cursor.fetchone()
-        
-        if student:
-            student_name, paid, completed = student
-            new_completed = completed + 1
-            left = paid - new_completed
-            
-            cursor.execute("UPDATE students SET completed_lessons = completed_lessons + 1 WHERE user_id = ?", 
-                          (student_id,))
-            conn.commit()
-            
-            await message.answer(f"✅ Отмечено занятие для {student_name}\n"
-                               f"Осталось оплаченных занятий: {left}")
-            
-            # Уведомляем ученика
-            try:
-                await bot.send_message(
-                    student_id,
-                    f"📚 Проведено занятие!\n\n"
-                    f"Осталось оплаченных занятий: {left}"
-                )
-            except:
-                pass
-            
-            # Проверяем, нужно ли напомнить об оплате
-            if left <= 0:
-                await bot.send_message(
-                    student_id,
-                    "⚠️ ВНИМАНИЕ! У вас закончились оплаченные занятия.\n\n"
-                    "Пожалуйста, пополните баланс, чтобы продолжить занятия."
-                )
-                await message.answer(f"📢 Напоминание об оплате отправлено ученику {student_name}")
-            
-            await state.clear()
-        else:
-            await message.answer("❌ Ученик не найден!")
-            await state.clear()
-    except:
-        await message.answer("❌ ID должен быть числом!")
-        await state.clear()
-
-@dp.callback_query(F.data == "set_schedule")
-async def callback_set_schedule(callback: CallbackQuery, state: FSMContext):
-    await callback.message.answer("Введите ID ученика:")
-    await state.set_state(SetSchedule.waiting_for_student_id)
-    await callback.answer()
-
-@dp.message(SetSchedule.waiting_for_student_id)
-async def process_schedule_student_id(message: Message, state: FSMContext):
-    try:
-        student_id = int(message.text)
-        cursor.execute("SELECT student_name FROM students WHERE user_id = ?", (student_id,))
-        student = cursor.fetchone()
-        
-        if student:
-            await state.update_data(student_id=student_id)
-            await message.answer(f"Ученик: {student[0]}\n\n"
-                               "Введите расписание в формате:\n"
-                               "Понедельник 16:00, Среда 18:30")
-            await state.set_state(SetSchedule.waiting_for_schedule)
-        else:
-            await message.answer("❌ Ученик не найден!")
-            await state.clear()
-    except:
-        await message.answer("❌ ID должен быть числом!")
-        await state.clear()
-
-@dp.message(SetSchedule.waiting_for_schedule)
-async def process_set_schedule(message: Message, state: FSMContext):
-    data = await state.get_data()
-    student_id = data['student_id']
-    schedule = message.text
-    
-    cursor.execute("UPDATE students SET schedule = ? WHERE user_id = ?", (schedule, student_id))
-    conn.commit()
-    
-    cursor.execute("SELECT student_name FROM students WHERE user_id = ?", (student_id,))
-    student_name = cursor.fetchone()[0]
-    
-    await message.answer(f"✅ Расписание для {student_name} установлено:\n\n{schedule}")
-    
-    # Отправляем ученику
-    try:
-        await bot.send_message(
-            student_id,
-            f"📅 Репетитор установил расписание:\n\n{schedule}"
-        )
-    except:
-        pass
-    
-    await state.clear()
-
-@dp.callback_query(F.data == "check_balance")
-async def callback_check_balance(callback: CallbackQuery):
-    await callback.message.answer("Введите ID ученика для просмотра баланса:")
-    await callback.answer()
-
-@dp.message(F.text)
-async def check_balance_by_id(message: Message):
-    if message.from_user.id != REPETITOR_ID:
-        return
-    try:
-        student_id = int(message.text)
-        cursor.execute("SELECT student_name, paid_lessons, completed_lessons FROM students WHERE user_id = ?", (student_id,))
-        student = cursor.fetchone()
-        if student:
-            student_name, paid, completed = student
-            left = paid - completed
-            await message.answer(f"📊 Баланс ученика {student_name}:\n\nОплачено: {paid}\nПроведено: {completed}\nОсталось: {left}")
-        else:
-            await message.answer("❌ Ученик не найден")
-    except:
-        pass
-
-# ========== ОБРАБОТЧИКИ ДЛЯ КНОПОК ДОМАШЕК ==========
-
-@dp.callback_query(F.data.startswith("reply_to_"))
-async def reply_to_homework(callback: CallbackQuery, state: FSMContext):
-    if callback.from_user.id != REPETITOR_ID:
-        await callback.answer("❌ Эта кнопка только для репетитора", show_alert=True)
-        return
-    
-    # Извлекаем имя ученика из callback_data
-    parts = callback.data.split("_")
-    student_name = parts[2]
-    
-    # Находим ID ученика по имени
-    cursor.execute("SELECT user_id FROM students WHERE student_name = ?", (student_name,))
-    result = cursor.fetchone()
-    
-    if result:
-        student_id = result[0]
-        await state.update_data(reply_to_student=student_id)
-        await state.set_state(ReplyToHomework.waiting_for_photo)
-        
-        await callback.message.answer(
-            f"✍️ Отправьте ответное фото или текст для ученика {student_name}\n\n"
-            f"Чтобы отменить ответ, отправьте /cancel"
-        )
-    else:
-        await callback.message.answer("❌ Ученик не найден")
-    
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("mark_hw_"))
+# Кнопка "Отмечено" - уведомляет ученика
+@dp.callback_query(F.data.startswith("mark_"))
 async def mark_homework_done(callback: CallbackQuery):
     if callback.from_user.id != REPETITOR_ID:
         await callback.answer("❌ Только для репетитора", show_alert=True)
         return
     
-    hw_id = int(callback.data.split("_")[2])
+    hw_id = int(callback.data.split("_")[1])
     
-    cursor.execute("UPDATE homework SET status = 'viewed' WHERE id = ?", (hw_id,))
-    conn.commit()
+    # Получаем информацию о домашке
+    cursor.execute("SELECT student_id, photo_id FROM homework WHERE id = ?", (hw_id,))
+    result = cursor.fetchone()
     
-    await callback.message.edit_reply_markup(reply_markup=None)
-    await callback.answer("✅ Домашнее задание отмечено как просмотренное")
+    if result:
+        student_id, photo_id = result
+        
+        # Обновляем статус
+        cursor.execute("UPDATE homework SET status = 'viewed' WHERE id = ?", (hw_id,))
+        conn.commit()
+        
+        # Уведомляем ученика
+        try:
+            await bot.send_message(
+                student_id,
+                "✅ Ваше домашнее задание проверено репетитором!\n\n"
+                "Спасибо за работу! 📚"
+            )
+        except Exception as e:
+            print(f"Не удалось уведомить ученика: {e}")
+        
+        # Убираем кнопки у сообщения
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer("✅ Домашка отмечена, ученик уведомлён!")
+    else:
+        await callback.answer("❌ Ошибка: задание не найдено", show_alert=True)
 
-# ========== ОБРАБОТЧИКИ ДЛЯ НАСТРОЕК (УДАЛЕНИЕ И БЭКАП) ==========
-
-@dp.callback_query(F.data == "stats")
-async def show_stats(callback: CallbackQuery):
-    if callback.from_user.id != REPETITOR_ID:
-        return
-    
-    cursor.execute("SELECT COUNT(*) FROM students")
-    students_count = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT SUM(paid_lessons) FROM students")
-    total_paid = cursor.fetchone()[0] or 0
-    
-    cursor.execute("SELECT SUM(completed_lessons) FROM students")
-    total_completed = cursor.fetchone()[0] or 0
-    
-    cursor.execute("SELECT COUNT(*) FROM homework WHERE status = 'new'")
-    pending_hw = cursor.fetchone()[0]
-    
-    await callback.message.answer(
-        f"📊 *Статистика бота*\n\n"
-        f"👥 Учеников: {students_count}\n"
-        f"✅ Всего оплачено занятий: {total_paid}\n"
-        f"📚 Всего проведено занятий: {total_completed}\n"
-        f"📸 Ожидают проверки домашек: {pending_hw}",
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "clear_viewed_hw")
-async def clear_viewed_homeworks(callback: CallbackQuery):
+# Кнопка "Ответить" - репетитор отвечает ученику
+@dp.callback_query(F.data.startswith("reply_"))
+async def reply_to_homework(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != REPETITOR_ID:
         await callback.answer("❌ Только для репетитора", show_alert=True)
         return
     
-    # Подтверждение
+    parts = callback.data.split("_")
+    hw_id = int(parts[1])
+    student_id = int(parts[2])
+    
+    # Сохраняем ID в состояние
+    await state.update_data(reply_hw_id=hw_id, reply_student_id=student_id)
+    await state.set_state(ReplyToHomework.waiting_for_photo)
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Ответить текстом", callback_data="reply_text_mode")]
+    ])
+    
+    await callback.message.answer(
+        "✍️ Как хотите ответить ученику?\n\n"
+        "• Отправьте ФОТО или ФАЙЛ\n"
+        "• Или нажмите кнопку для текстового ответа",
+        reply_markup=keyboard
+    )
+    await callback.answer()
+
+# Переключение на текстовый режим ответа
+@dp.callback_query(F.data == "reply_text_mode")
+async def reply_text_mode(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(ReplyToHomework.waiting_for_text)
+    await callback.message.answer("✍️ Введите текст ответа для ученика:")
+    await callback.answer()
+
+# Обработка текстового ответа
+@dp.message(ReplyToHomework.waiting_for_text, F.text)
+async def process_text_reply(message: Message, state: FSMContext):
+    data = await state.get_data()
+    student_id = data.get('reply_student_id')
+    
+    if not student_id:
+        await message.answer("❌ Ошибка: ученик не найден")
+        await state.clear()
+        return
+    
+    try:
+        await bot.send_message(
+            student_id,
+            f"📢 *Ответ от репетитора на домашнее задание:*\n\n{message.text}",
+            parse_mode="Markdown"
+        )
+        await message.answer("✅ Ответ отправлен ученику!")
+        await state.clear()
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+# Обработка фото-ответа
+@dp.message(ReplyToHomework.waiting_for_photo, F.photo)
+async def process_photo_reply(message: Message, state: FSMContext):
+    data = await state.get_data()
+    student_id = data.get('reply_student_id')
+    hw_id = data.get('reply_hw_id')
+    
+    if not student_id:
+        await message.answer("❌ Ошибка: ученик не найден")
+        await state.clear()
+        return
+    
+    photo_id = message.photo[-1].file_id
+    caption = message.caption or "Ответ на домашнее задание"
+    
+    try:
+        await bot.send_photo(
+            student_id,
+            photo_id,
+            caption=f"📢 *Ответ от репетитора:*\n\n{caption}",
+            parse_mode="Markdown"
+        )
+        await message.answer("✅ Фото-ответ отправлен ученику!")
+        
+        # Сохраняем ответ в БД
+        cursor.execute("""
+            INSERT INTO homework (student_id, teacher_id, photo_id, caption, status)
+            VALUES (?, ?, ?, ?, 'reply')
+        """, (student_id, REPETITOR_ID, photo_id, caption))
+        conn.commit()
+        
+        await state.clear()
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+# Удаление просмотренных домашек
+@dp.callback_query(F.data == "clear_viewed")
+async def clear_viewed(callback: CallbackQuery):
+    if callback.from_user.id != REPETITOR_ID:
+        return
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Да, удалить", callback_data="confirm_clear_viewed")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_clear")]
+        [InlineKeyboardButton(text="❌ Нет", callback_data="cancel_clear")]
     ])
     
     await callback.message.answer(
-        "⚠️ *Подтверждение удаления*\n\n"
-        "Вы действительно хотите удалить ВСЕ просмотренные домашние задания?\n\n"
+        "⚠️ Удалить все просмотренные домашние задания?\n\n"
         "Это действие нельзя отменить.",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "clear_all_hw")
-async def clear_all_homeworks(callback: CallbackQuery):
-    if callback.from_user.id != REPETITOR_ID:
-        await callback.answer("❌ Только для репетитора", show_alert=True)
-        return
-    
-    # Подсчитываем количество
-    cursor.execute("SELECT COUNT(*) FROM homework")
-    total = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM homework WHERE status = 'new'")
-    new_count = cursor.fetchone()[0]
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚠️ ДА, УДАЛИТЬ ВСЁ", callback_data="confirm_clear_all")],
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_clear")]
-    ])
-    
-    await callback.message.answer(
-        f"🚨 *ОПАСНОЕ ДЕЙСТВИЕ!*\n\n"
-        f"Вы хотите удалить ВСЕ домашние задания ({total} шт.)\n"
-        f"Из них НОВЫХ: {new_count}\n\n"
-        f"**Эти задания будут удалены без возможности восстановления!**\n\n"
-        f"Нажмите кнопку ниже ТОЛЬКО если вы уверены:",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
+        reply_markup=keyboard
     )
     await callback.answer()
 
@@ -693,6 +525,27 @@ async def confirm_clear_viewed(callback: CallbackQuery):
     conn.commit()
     
     await callback.message.edit_text(f"✅ Удалено {count} просмотренных домашних заданий.")
+    await callback.answer()
+
+# Удаление всех домашек
+@dp.callback_query(F.data == "clear_all")
+async def clear_all(callback: CallbackQuery):
+    if callback.from_user.id != REPETITOR_ID:
+        return
+    
+    cursor.execute("SELECT COUNT(*) FROM homework")
+    total = cursor.fetchone()[0]
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚠️ ДА, УДАЛИТЬ ВСЁ", callback_data="confirm_clear_all")],
+        [InlineKeyboardButton(text="❌ Нет", callback_data="cancel_clear")]
+    ])
+    
+    await callback.message.answer(
+        f"🚨 Удалить ВСЕ домашние задания ({total} шт.)?\n\n"
+        f"Это действие НЕЛЬЗЯ отменить!",
+        reply_markup=keyboard
+    )
     await callback.answer()
 
 @dp.callback_query(F.data == "confirm_clear_all")
@@ -714,8 +567,37 @@ async def cancel_clear(callback: CallbackQuery):
     await callback.message.edit_text("❌ Удаление отменено.")
     await callback.answer()
 
-@dp.callback_query(F.data == "backup_db")
-async def backup_database(callback: CallbackQuery):
+# Статистика
+@dp.callback_query(F.data == "stats")
+async def show_stats(callback: CallbackQuery):
+    if callback.from_user.id != REPETITOR_ID:
+        return
+    
+    cursor.execute("SELECT COUNT(*) FROM students")
+    students_count = cursor.fetchone()[0]
+    
+    cursor.execute("SELECT SUM(paid_lessons) FROM students")
+    total_paid = cursor.fetchone()[0] or 0
+    
+    cursor.execute("SELECT SUM(completed_lessons) FROM students")
+    total_completed = cursor.fetchone()[0] or 0
+    
+    cursor.execute("SELECT COUNT(*) FROM homework WHERE status = 'new'")
+    pending_hw = cursor.fetchone()[0]
+    
+    await callback.message.answer(
+        f"📊 *Статистика*\n\n"
+        f"👥 Учеников: {students_count}\n"
+        f"✅ Оплачено занятий: {total_paid}\n"
+        f"📚 Проведено занятий: {total_completed}\n"
+        f"📸 Ждут проверки: {pending_hw}",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+# Резервная копия
+@dp.callback_query(F.data == "backup")
+async def backup_db(callback: CallbackQuery):
     if callback.from_user.id != REPETITOR_ID:
         return
     
@@ -723,91 +605,169 @@ async def backup_database(callback: CallbackQuery):
         backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
         shutil.copy2("tutor_bot.db", backup_name)
         
-        # Отправляем файл репетитору
-        with open(backup_name, 'rb') as f:
-            await callback.message.answer_document(
-                FSInputFile(backup_name),
-                caption=f"💾 Резервная копия БД от {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
-            )
+        await callback.message.answer_document(
+            FSInputFile(backup_name),
+            caption=f"💾 Резервная копия от {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+        )
         
-        # Удаляем временный файл
         os.remove(backup_name)
-        
-        await callback.message.answer("✅ Резервная копия создана и отправлена!")
+        await callback.message.answer("✅ Резервная копия создана!")
     except Exception as e:
-        await callback.message.answer(f"❌ Ошибка при создании бэкапа: {e}")
+        await callback.message.answer(f"❌ Ошибка: {e}")
     
     await callback.answer()
 
-# ========== ОБРАБОТКА ФОТО (ДОМАШКА) ==========
+# ========== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ ==========
 
-@dp.message(ReplyToHomework.waiting_for_photo, F.photo)
-async def send_reply_photo(message: Message, state: FSMContext):
-    data = await state.get_data()
-    student_id = data.get('reply_to_student')
-    
-    if not student_id:
-        await message.answer("❌ Ошибка: не найден ученик для ответа")
-        await state.clear()
-        return
-    
-    photo_id = message.photo[-1].file_id
-    caption = message.caption or "📝 Ответ на домашнее задание"
-    
+# Добавление оплаты
+@dp.callback_query(F.data == "add_payment")
+async def cb_add_payment(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите ID ученика:")
+    await state.set_state(AddPayment.waiting_for_student_id)
+    await callback.answer()
+
+@dp.message(AddPayment.waiting_for_student_id)
+async def process_payment_student_id(message: Message, state: FSMContext):
     try:
-        await bot.send_photo(
-            student_id,
-            photo_id,
-            caption=f"📢 Ответ от репетитора:\n\n{caption}"
-        )
-        await message.answer(f"✅ Ответ отправлен ученику!")
+        student_id = int(message.text)
+        cursor.execute("SELECT student_name FROM students WHERE user_id = ?", (student_id,))
+        student = cursor.fetchone()
         
-        cursor.execute("""
-            INSERT INTO homework (student_id, teacher_id, photo_id, caption, status)
-            VALUES (?, ?, ?, ?, 'reply')
-        """, (student_id, REPETITOR_ID, photo_id, caption))
+        if student:
+            await state.update_data(student_id=student_id)
+            await message.answer(f"Ученик: {student[0]}\n\nВведите количество занятий:")
+            await state.set_state(AddPayment.waiting_for_amount)
+        else:
+            await message.answer("❌ Ученик не найден!")
+            await state.clear()
+    except:
+        await message.answer("❌ Введите число!")
+
+@dp.message(AddPayment.waiting_for_amount)
+async def process_payment_amount(message: Message, state: FSMContext):
+    try:
+        amount = int(message.text)
+        data = await state.get_data()
+        student_id = data['student_id']
+        
+        cursor.execute("UPDATE students SET paid_lessons = paid_lessons + ? WHERE user_id = ?", (amount, student_id))
         conn.commit()
         
-    except Exception as e:
-        await message.answer(f"❌ Ошибка при отправке: {e}")
+        cursor.execute("SELECT student_name FROM students WHERE user_id = ?", (student_id,))
+        student_name = cursor.fetchone()[0]
+        
+        await message.answer(f"✅ Добавлено {amount} занятий для {student_name}")
+        
+        try:
+            await bot.send_message(student_id, f"💰 Пополнение баланса!\n\nДобавлено {amount} занятий.")
+        except:
+            pass
+        
+        await state.clear()
+    except:
+        await message.answer("❌ Введите число!")
+
+# Отметить проведенное занятие
+@dp.callback_query(F.data == "complete_lesson")
+async def cb_complete_lesson(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите ID ученика:")
+    await state.set_state(CompleteLesson.waiting_for_student_id)
+    await callback.answer()
+
+@dp.message(CompleteLesson.waiting_for_student_id)
+async def process_complete_lesson(message: Message, state: FSMContext):
+    try:
+        student_id = int(message.text)
+        cursor.execute("SELECT student_name, paid_lessons, completed_lessons FROM students WHERE user_id = ?", (student_id,))
+        student = cursor.fetchone()
+        
+        if student:
+            student_name, paid, completed = student
+            new_completed = completed + 1
+            left = paid - new_completed
+            
+            cursor.execute("UPDATE students SET completed_lessons = completed_lessons + 1 WHERE user_id = ?", (student_id,))
+            conn.commit()
+            
+            await message.answer(f"✅ Отмечено занятие для {student_name}\nОсталось: {left}")
+            
+            try:
+                await bot.send_message(student_id, f"📚 Проведено занятие!\n\nОсталось оплаченных занятий: {left}")
+                if left <= 0:
+                    await bot.send_message(student_id, "⚠️ ВНИМАНИЕ! У вас закончились оплаченные занятия. Пожалуйста, пополните баланс.")
+            except:
+                pass
+            
+            await state.clear()
+        else:
+            await message.answer("❌ Ученик не найден!")
+            await state.clear()
+    except:
+        await message.answer("❌ Введите число!")
+
+# Задать расписание
+@dp.callback_query(F.data == "set_schedule")
+async def cb_set_schedule(callback: CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите ID ученика:")
+    await state.set_state(SetSchedule.waiting_for_student_id)
+    await callback.answer()
+
+@dp.message(SetSchedule.waiting_for_student_id)
+async def process_schedule_student_id(message: Message, state: FSMContext):
+    try:
+        student_id = int(message.text)
+        cursor.execute("SELECT student_name FROM students WHERE user_id = ?", (student_id,))
+        student = cursor.fetchone()
+        
+        if student:
+            await state.update_data(student_id=student_id)
+            await message.answer(f"Ученик: {student[0]}\n\nВведите расписание (например: Пн 16:00, Ср 18:30):")
+            await state.set_state(SetSchedule.waiting_for_schedule)
+        else:
+            await message.answer("❌ Ученик не найден!")
+            await state.clear()
+    except:
+        await message.answer("❌ Введите число!")
+
+@dp.message(SetSchedule.waiting_for_schedule)
+async def process_set_schedule(message: Message, state: FSMContext):
+    data = await state.get_data()
+    student_id = data['student_id']
+    schedule = message.text
+    
+    cursor.execute("UPDATE students SET schedule = ? WHERE user_id = ?", (schedule, student_id))
+    conn.commit()
+    
+    cursor.execute("SELECT student_name FROM students WHERE user_id = ?", (student_id,))
+    student_name = cursor.fetchone()[0]
+    
+    await message.answer(f"✅ Расписание для {student_name} установлено:\n\n{schedule}")
+    
+    try:
+        await bot.send_message(student_id, f"📅 Репетитор установил расписание:\n\n{schedule}")
+    except:
+        pass
     
     await state.clear()
 
-@dp.message(ReplyToHomework.waiting_for_photo, F.text)
-async def send_reply_text(message: Message, state: FSMContext):
-    data = await state.get_data()
-    student_id = data.get('reply_to_student')
-    
-    if not student_id:
-        await message.answer("❌ Ошибка: не найден ученик для ответа")
-        await state.clear()
-        return
-    
-    try:
-        await bot.send_message(
-            student_id,
-            f"📢 Ответ от репетитора:\n\n{message.text}"
-        )
-        await message.answer(f"✅ Ответ отправлен ученику!")
-        await state.clear()
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+# Проверить баланс
+@dp.callback_query(F.data == "check_balance")
+async def cb_check_balance(callback: CallbackQuery):
+    await callback.message.answer("Введите ID ученика:")
+    await callback.answer()
 
+# Обработка фото от ученика
 @dp.message(F.photo)
-async def handle_homework_photo(message: Message, state: FSMContext):
+async def handle_student_photo(message: Message):
     user_id = message.from_user.id
+    
+    if user_id == REPETITOR_ID:
+        return
     
     cursor.execute("SELECT student_name FROM students WHERE user_id = ?", (user_id,))
     student = cursor.fetchone()
     
-    if user_id == REPETITOR_ID:
-        # Репетитор отправил фото — спрашиваем, кому
-        await message.answer("Кому отправить это фото? Введите ID ученика или имя ученика\n\nДля отмены: /cancel")
-        await state.update_data(pending_photo=message.photo[-1].file_id, pending_caption=message.caption or "")
-        await state.set_state(TeacherSendPhoto.waiting_for_student_id)
-        
-    elif student:
-        # Ученик отправил — сохраняем и уведомляем репетитора
+    if student:
         photo_id = message.photo[-1].file_id
         caption = message.caption or ""
         
@@ -820,89 +780,27 @@ async def handle_homework_photo(message: Message, state: FSMContext):
         
         await message.answer("✅ Домашнее задание отправлено репетитору!")
         
-        # Получаем имя ученика
         student_name = student[0]
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📝 Ответить", callback_data=f"reply_to_{student_name}_{hw_id}")]
-        ])
         
         await bot.send_message(
             REPETITOR_ID,
             f"📸 Новое домашнее задание от {student_name}!\n"
-            f"ID ученика: `{user_id}`\n"
-            f"Комментарий: {caption if caption else 'Нет комментария'}"
+            f"ID ученика: `{user_id}`"
         )
-        await bot.send_photo(REPETITOR_ID, photo_id, reply_markup=keyboard)
     else:
         await message.answer("❌ Вы не зарегистрированы! Используйте /register")
 
-@dp.message(TeacherSendPhoto.waiting_for_student_id, F.text)
-async def process_teacher_send_photo(message: Message, state: FSMContext):
-    if message.text == "/cancel":
-        await state.clear()
-        await message.answer("❌ Отправка отменена")
-        return
-    
-    try:
-        # Пробуем найти по ID или по имени
-        student_id = None
-        if message.text.isdigit():
-            student_id = int(message.text)
-            cursor.execute("SELECT student_name FROM students WHERE user_id = ?", (student_id,))
-        else:
-            cursor.execute("SELECT user_id, student_name FROM students WHERE student_name LIKE ?", (f"%{message.text}%",))
-        
+# Ответ на любое сообщение для проверки баланса
+@dp.message(F.text)
+async def handle_text(message: Message):
+    if message.from_user.id == REPETITOR_ID and message.text.isdigit():
+        student_id = int(message.text)
+        cursor.execute("SELECT student_name, paid_lessons, completed_lessons FROM students WHERE user_id = ?", (student_id,))
         student = cursor.fetchone()
-        
         if student:
-            if message.text.isdigit():
-                student_name = student[0]
-            else:
-                student_id = student[0]
-                student_name = student[1]
-            
-            data = await state.get_data()
-            photo_id = data.get('pending_photo')
-            caption = data.get('pending_caption', '')
-            
-            await bot.send_photo(
-                student_id,
-                photo_id,
-                caption=f"📚 Материал от репетитора:\n\n{caption}"
-            )
-            await message.answer(f"✅ Фото отправлено ученику {student_name}")
-            await state.clear()
-        else:
-            await message.answer("❌ Ученик с таким ID/именем не найден!\n\nВведите ID из списка учеников (команда /start → Все ученики)")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-
-# ========== АВТОМАТИЧЕСКАЯ ОЧИСТКА СТАРЫХ ДОМАШЕК ==========
-
-async def auto_cleanup_old_homeworks():
-    """Автоматически удаляет домашку, которой больше 30 дней"""
-    while True:
-        try:
-            # Ждём 7 дней перед первым запуском
-            await asyncio.sleep(7 * 24 * 60 * 60)
-            
-            # Удаляем домашку, которой больше 30 дней
-            cursor.execute("""
-                DELETE FROM homework 
-                WHERE timestamp < datetime('now', '-30 days')
-            """)
-            conn.commit()
-            
-            deleted = cursor.rowcount
-            if deleted > 0:
-                await bot.send_message(
-                    REPETITOR_ID,
-                    f"🧹 Автоматическая очистка: удалено {deleted} старых домашек (старше 30 дней)"
-                )
-        except Exception as e:
-            print(f"Ошибка автоочистки: {e}")
-            await asyncio.sleep(24 * 60 * 60)  # При ошибке ждём сутки
+            student_name, paid, completed = student
+            left = paid - completed
+            await message.answer(f"📊 Баланс {student_name}:\nОплачено: {paid}\nПроведено: {completed}\nОсталось: {left}")
 
 # ========== ЗАПУСК ==========
 
@@ -910,12 +808,7 @@ async def main():
     print("🤖 Бот запущен!")
     print(f"📊 Репетитор ID: {REPETITOR_ID}")
     print("=" * 40)
-    
-    # Запускаем автоочистку в фоне
-    asyncio.create_task(auto_cleanup_old_homeworks())
-    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
     asyncio.run(main())
